@@ -59,6 +59,14 @@
                         <p class="text-xs text-amber-700 mt-1">
                             <strong>Last check:</strong> <span id="lastCheck">Never</span>
                         </p>
+                        <p class="text-xs text-amber-700 mt-1">
+                            <strong>Last source:</strong> <span id="lastSource">N/A</span>
+                        </p>
+                    </div>
+                    
+                    <div id="recentAnnouncements" class="bg-purple-50 border border-purple-200 rounded-lg p-4 mb-4 hidden">
+                        <p class="text-sm font-bold text-purple-800 mb-2">Recent Announcements:</p>
+                        <div id="announcementList" class="text-xs text-purple-700 space-y-1 max-h-40 overflow-y-auto"></div>
                     </div>
                     
                     <div id="debugLog" class="bg-gray-50 border border-gray-300 rounded-lg p-3 mb-4 hidden">
@@ -134,11 +142,34 @@
         const foundCountEl = document.getElementById('foundCount');
         const currentRadiusEl = document.getElementById('currentRadius');
         const lastCheckEl = document.getElementById('lastCheck');
+        const lastSourceEl = document.getElementById('lastSource');
+        const recentAnnouncementsDiv = document.getElementById('recentAnnouncements');
+        const announcementListEl = document.getElementById('announcementList');
         const debugLogDiv = document.getElementById('debugLog');
         const debugMessagesEl = document.getElementById('debugMessages');
         const startBtn = document.getElementById('startBtn');
         const stopBtn = document.getElementById('stopBtn');
         const checkBtn = document.getElementById('checkBtn');
+
+        function addAnnouncement(placeName, source) {
+            const sourceLabel = source === 'historic_england' ? 'Historic England' : 'Wikipedia';
+            const sourceColor = source === 'historic_england' ? 'text-blue-700' : 'text-green-700';
+            
+            const timestamp = new Date().toLocaleTimeString();
+            const item = document.createElement('div');
+            item.className = 'border-b border-purple-200 pb-1 mb-1';
+            item.innerHTML = `<span class="font-medium">${placeName}</span> <span class="${sourceColor}">[${sourceLabel}]</span> <span class="text-gray-500">- ${timestamp}</span>`;
+            
+            announcementListEl.insertBefore(item, announcementListEl.firstChild);
+            recentAnnouncementsDiv.classList.remove('hidden');
+            
+            lastSourceEl.textContent = sourceLabel;
+            
+            // Keep only last 5 announcements
+            while (announcementListEl.children.length > 5) {
+                announcementListEl.removeChild(announcementListEl.lastChild);
+            }
+        }
 
         function addDebugMessage(msg) {
             const timestamp = new Date().toLocaleTimeString();
@@ -161,10 +192,29 @@
 
         function speak(text) {
             return new Promise((resolve) => {
-                const utterance = new SpeechSynthesisUtterance(text);
-                utterance.rate = 0.9;
-                utterance.pitch = 1;
+                // Add natural pauses
+                const naturalText = text
+                    .replace(/\. /g, '... ')  // Longer pause after sentences
+                    .replace(/, /g, ',, ');    // Pause after commas
+                
+                const utterance = new SpeechSynthesisUtterance(naturalText);
+                utterance.rate = 0.85;  // Slightly slower for clarity
+                utterance.pitch = 1.05;  // Slightly higher pitch sounds more natural
                 utterance.volume = 1;
+                
+                // Try to select a better voice if available
+                const voices = window.speechSynthesis.getVoices();
+                const preferredVoices = voices.filter(v => 
+                    v.lang.startsWith('en') && 
+                    (v.name.includes('Google') || v.name.includes('Natural') || v.name.includes('Enhanced'))
+                );
+                if (preferredVoices.length > 0) {
+                    utterance.voice = preferredVoices[0];
+                } else if (voices.length > 0) {
+                    const enVoice = voices.find(v => v.lang.startsWith('en-GB')) || 
+                                   voices.find(v => v.lang.startsWith('en'));
+                    if (enVoice) utterance.voice = enVoice;
+                }
                 
                 utterance.onstart = () => {
                     console.log('Started speaking:', text.substring(0, 50));
@@ -187,7 +237,15 @@
                 isSpeaking = true;
                 speakingDiv.classList.remove('hidden');
                 window.speechSynthesis.cancel();
-                window.speechSynthesis.speak(utterance);
+                
+                // Ensure voices are loaded
+                if (voices.length === 0) {
+                    window.speechSynthesis.onvoiceschanged = () => {
+                        window.speechSynthesis.speak(utterance);
+                    };
+                } else {
+                    window.speechSynthesis.speak(utterance);
+                }
             });
         }
 
@@ -284,11 +342,153 @@
             return `${intro}. ${summary}`;
         }
 
+        // Convert WGS84 coordinates to British National Grid (required for Historic England API)
+        function wgs84ToBNG(lat, lon) {
+            // This is a simplified approximation - for production use a proper library
+            // But it's good enough for our radius search purposes
+            const a = 6377563.396;
+            const b = 6356256.909;
+            const F0 = 0.9996012717;
+            const lat0 = 49 * Math.PI / 180;
+            const lon0 = -2 * Math.PI / 180;
+            const N0 = -100000;
+            const E0 = 400000;
+            const e2 = 1 - (b*b)/(a*a);
+            const n = (a-b)/(a+b);
+            
+            const latRad = lat * Math.PI / 180;
+            const lonRad = lon * Math.PI / 180;
+            
+            const cosLat = Math.cos(latRad);
+            const sinLat = Math.sin(latRad);
+            
+            const nu = a * F0 / Math.sqrt(1 - e2 * sinLat * sinLat);
+            const rho = a * F0 * (1 - e2) / Math.pow(1 - e2 * sinLat * sinLat, 1.5);
+            const eta2 = nu / rho - 1;
+            
+            const M = (b * F0) * (
+                (1 + n + (5/4)*n*n + (5/4)*n*n*n) * (latRad - lat0) -
+                (3*n + 3*n*n + (21/8)*n*n*n) * Math.sin(latRad - lat0) * Math.cos(latRad + lat0) +
+                ((15/8)*n*n + (15/8)*n*n*n) * Math.sin(2*(latRad - lat0)) * Math.cos(2*(latRad + lat0)) -
+                (35/24)*n*n*n * Math.sin(3*(latRad - lat0)) * Math.cos(3*(latRad + lat0))
+            );
+            
+            const I = M + N0;
+            const II = (nu/2) * sinLat * cosLat;
+            const III = (nu/24) * sinLat * Math.pow(cosLat, 3) * (5 - Math.pow(Math.tan(latRad), 2) + 9*eta2);
+            const IIIA = (nu/720) * sinLat * Math.pow(cosLat, 5) * (61 - 58*Math.pow(Math.tan(latRad), 2) + Math.pow(Math.tan(latRad), 4));
+            
+            const IV = nu * cosLat;
+            const V = (nu/6) * Math.pow(cosLat, 3) * (nu/rho - Math.pow(Math.tan(latRad), 2));
+            const VI = (nu/120) * Math.pow(cosLat, 5) * (5 - 18*Math.pow(Math.tan(latRad), 2) + Math.pow(Math.tan(latRad), 4) + 14*eta2 - 58*Math.pow(Math.tan(latRad), 2)*eta2);
+            
+            const dLon = lonRad - lon0;
+            
+            const northing = I + II*dLon*dLon + III*Math.pow(dLon, 4) + IIIA*Math.pow(dLon, 6);
+            const easting = E0 + IV*dLon + V*Math.pow(dLon, 3) + VI*Math.pow(dLon, 5);
+            
+            return {easting: Math.round(easting), northing: Math.round(northing)};
+        }
+
+        // Fetch from Historic England API
+        async function fetchHistoricEngland(lat, lon, searchRadius) {
+            try {
+                const bng = wgs84ToBNG(lat, lon);
+                const url = `https://services-eu1.arcgis.com/ZOdPfBS3aqqDYPUQ/arcgis/rest/services/National_Heritage_List_for_England_NHLE_v02_VIEW/FeatureServer/0/query?` +
+                    `geometry=${bng.easting},${bng.northing}&` +
+                    `geometryType=esriGeometryPoint&` +
+                    `inSR=27700&` +
+                    `spatialRel=esriSpatialRelIntersects&` +
+                    `distance=${searchRadius}&` +
+                    `units=esriSRUnit_Meter&` +
+                    `outFields=Name,Grade,ListEntry&` +
+                    `returnGeometry=true&` +
+                    `outSR=4326&` +
+                    `f=json`;
+                
+                addDebugMessage(`Querying Historic England API...`);
+                
+                const response = await fetch(url);
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                
+                const data = await response.json();
+                const features = data.features || [];
+                
+                // Convert to format similar to Wikipedia
+                const places = features.map(f => {
+                    const dist = Math.sqrt(
+                        Math.pow((f.geometry.x - lon) * 111320 * Math.cos(lat * Math.PI / 180), 2) +
+                        Math.pow((f.geometry.y - lat) * 110574, 2)
+                    );
+                    
+                    return {
+                        title: f.attributes.Name || 'Historic Building',
+                        lat: f.geometry.y,
+                        lon: f.geometry.x,
+                        dist: dist,
+                        pageid: `he_${f.attributes.ListEntry}`,
+                        grade: f.attributes.Grade,
+                        listEntry: f.attributes.ListEntry,
+                        source: 'historic_england'
+                    };
+                }).sort((a, b) => a.dist - b.dist);
+                
+                addDebugMessage(`Historic England: Found ${places.length} listed buildings`);
+                return places;
+            } catch (error) {
+                console.error('Historic England API error:', error);
+                addDebugMessage(`Historic England error: ${error.message}`);
+                return [];
+            }
+        }
+
         async function fetchNearbyPlaces(lat, lon, searchRadius) {
             try {
-                const url = `https://en.wikipedia.org/w/api.php?action=query&list=geosearch&gscoord=${lat}|${lon}&gsradius=${searchRadius}&gslimit=15&format=json&origin=*`;
+                // Search both Historic England and Wikipedia in parallel
+                const [historicEnglandPlaces, wikipediaPlaces] = await Promise.all([
+                    fetchHistoricEngland(lat, lon, searchRadius),
+                    fetchWikipedia(lat, lon, searchRadius)
+                ]);
                 
-                addDebugMessage(`Searching at ${lat.toFixed(4)}, ${lon.toFixed(4)} with ${searchRadius}m radius`);
+                // Combine and deduplicate
+                const allPlaces = [...historicEnglandPlaces, ...wikipediaPlaces];
+                const uniquePlaces = [];
+                const seen = new Set();
+                
+                for (const place of allPlaces) {
+                    const key = place.title.toLowerCase();
+                    if (!seen.has(key)) {
+                        seen.add(key);
+                        uniquePlaces.push(place);
+                    }
+                }
+                
+                // Sort by distance
+                uniquePlaces.sort((a, b) => a.dist - b.dist);
+                
+                addDebugMessage(`Found ${uniquePlaces.length} total places (${historicEnglandPlaces.length} from Historic England, ${wikipediaPlaces.length} from Wikipedia)`);
+                foundCountEl.textContent = uniquePlaces.length;
+                
+                if (uniquePlaces.length > 0) {
+                    uniquePlaces.slice(0, 5).forEach((p, i) => {
+                        const source = p.source === 'historic_england' ? ' [HE]' : ' [Wiki]';
+                        addDebugMessage(`${i+1}. ${p.title}${source} - ${Math.round(p.dist)}m away`);
+                    });
+                }
+                
+                return uniquePlaces;
+            } catch (error) {
+                addDebugMessage(`ERROR: ${error.message}`);
+                setStatus('Error fetching places', error.message);
+                return [];
+            }
+        }
+
+        async function fetchWikipedia(lat, lon, searchRadius) {
+            try {
+                const url = `https://en.wikipedia.org/w/api.php?action=query&list=geosearch&gscoord=${lat}|${lon}&gsradius=${searchRadius}&gslimit=15&format=json&origin=*`;
                 
                 const response = await fetch(url, {
                     method: 'GET',
@@ -298,38 +498,36 @@
                     mode: 'cors'
                 });
                 
-                addDebugMessage(`API response status: ${response.status}`);
-                
                 if (!response.ok) {
                     throw new Error(`HTTP error! status: ${response.status}`);
                 }
                 
                 const data = await response.json();
-                const places = data.query?.geosearch || [];
-                
-                addDebugMessage(`Found ${places.length} places in ${searchRadius}m radius`);
-                foundCountEl.textContent = places.length;
-                
-                if (places.length > 0) {
-                    places.forEach((p, i) => {
-                        if (i < 5) {
-                            addDebugMessage(`${i+1}. ${p.title} - ${p.dist}m away`);
-                        }
-                    });
-                } else {
-                    addDebugMessage('No Wikipedia entries found nearby');
-                }
+                const places = (data.query?.geosearch || []).map(p => ({
+                    ...p,
+                    lon: p.lon,
+                    pageid: `wiki_${p.pageid}`,
+                    source: 'wikipedia'
+                }));
                 
                 return places;
             } catch (error) {
-                addDebugMessage(`ERROR: ${error.message}`);
-                setStatus('Error fetching places', error.message);
+                console.error('Wikipedia API error:', error);
+                addDebugMessage(`Wikipedia error: ${error.message}`);
                 return [];
             }
         }
 
-        async function fetchArticleSummary(pageId) {
+        async function fetchArticleSummary(place) {
+            // Handle Historic England entries
+            if (place.source === 'historic_england') {
+                const gradeText = place.grade ? `This is a Grade ${place.grade} listed building.` : 'This is a listed building.';
+                return `${gradeText} It is recognized for its special architectural and historic interest.`;
+            }
+            
+            // Handle Wikipedia entries
             try {
+                const pageId = place.pageid.replace('wiki_', '');
                 const url = `https://en.wikipedia.org/w/api.php?action=query&prop=extracts&exintro=1&explaintext=1&pageids=${pageId}&format=json&origin=*`;
                 
                 const response = await fetch(url, {
@@ -344,8 +542,7 @@
                 const page = data.query.pages[pageId];
                 
                 if (page && page.extract) {
-                    const sentences = page.extract.split('. ').slice(0, 3).join('. ');
-                    return sentences + (sentences.endsWith('.') ? '' : '.');
+                    return extractInterestingFacts(page.extract);
                 }
                 
                 return null;
@@ -354,6 +551,94 @@
                 addDebugMessage(`Error getting summary: ${error.message}`);
                 return null;
             }
+        }
+
+        // Extract the most interesting facts from Wikipedia text
+        function extractInterestingFacts(text) {
+            // Split into sentences
+            const sentences = text.split(/\. |\.\n/).map(s => s.trim()).filter(s => s.length > 0);
+            
+            if (sentences.length === 0) return null;
+            
+            // Keywords that indicate interesting/notable facts
+            const interestingKeywords = [
+                'unique', 'only', 'first', 'oldest', 'largest', 'tallest', 'most',
+                'famous', 'notable', 'significant', 'important', 'rare',
+                'unesco', 'heritage', 'medieval', 'ancient', 'historic',
+                'built in', 'dates from', 'founded', 'established',
+                'grade i', 'grade ii', 'listed'
+            ];
+            
+            // Score each sentence
+            const scoredSentences = sentences.map(sentence => {
+                const lower = sentence.toLowerCase();
+                let score = 0;
+                
+                // Avoid overly long or short sentences
+                if (sentence.length < 20 || sentence.length > 250) {
+                    score -= 5;
+                }
+                
+                // Check for interesting keywords
+                interestingKeywords.forEach(keyword => {
+                    if (lower.includes(keyword)) {
+                        score += 3;
+                    }
+                });
+                
+                // Avoid sentences with too many dates/numbers (usually boring details)
+                const numberMatches = sentence.match(/\d{4}|\d+th century/g);
+                if (numberMatches && numberMatches.length > 2) {
+                    score -= 2;
+                }
+                
+                // Avoid sentences that are just definitions or locations
+                if (lower.startsWith('is a') || lower.includes('is located in') || lower.includes('is situated')) {
+                    score -= 3;
+                }
+                
+                // Prefer sentences with active verbs
+                if (lower.includes('built') || lower.includes('designed') || lower.includes('created') || lower.includes('founded')) {
+                    score += 1;
+                }
+                
+                // Penalize overly technical language
+                if (lower.includes('consists of') || lower.includes('comprises') || lower.includes('constructed')) {
+                    score -= 1;
+                }
+                
+                return { sentence, score };
+            });
+            
+            // Sort by score
+            scoredSentences.sort((a, b) => b.score - a.score);
+            
+            // Take the highest scoring sentence, or first sentence if none score well
+            const topSentences = scoredSentences.slice(0, 2);
+            
+            // If top sentence has negative score, just use first sentence
+            if (topSentences[0].score < 0 && sentences.length > 0) {
+                return sentences[0] + '.';
+            }
+            
+            // If we have a good interesting sentence, use just that one
+            if (topSentences[0].score >= 2) {
+                return topSentences[0].sentence + '.';
+            }
+            
+            // Otherwise combine first sentence (for context) with best interesting sentence
+            if (topSentences.length >= 2 && topSentences[1].score > 0) {
+                // Remove redundant info from second sentence
+                let secondSent = topSentences[1].sentence;
+                // Don't repeat the name if it's in the first sentence
+                const firstWords = sentences[0].split(' ').slice(0, 5).join(' ');
+                if (secondSent.toLowerCase().includes(firstWords.toLowerCase())) {
+                    return topSentences[0].sentence + '. ' + topSentences[1].sentence + '.';
+                }
+            }
+            
+            // Fall back to just first sentence, cleaned up
+            return sentences[0] + '.';
         }
 
         async function checkAndAnnounce(lat, lon, forceCheck = false) {
@@ -405,10 +690,10 @@
                     continue;
                 }
                 
-                setStatus(`Found: ${place.title}`, `Distance: ${place.dist}m`);
+                setStatus(`Found: ${place.title}`, `Distance: ${Math.round(place.dist)}m`);
                 addDebugMessage(`Fetching info for ${place.title}...`);
                 
-                const summary = await fetchArticleSummary(place.pageid);
+                const summary = await fetchArticleSummary(place);
                 
                 if (summary) {
                     // Calculate direction
@@ -417,7 +702,9 @@
                     
                     const announcement = generateAnnouncement(place.title, summary, place.dist, direction);
                     addToSpeechQueue(announcement);
-                    addDebugMessage(`Announcing: ${place.title} (${direction || 'no heading'})`);
+                    addDebugMessage(`Announcing: ${place.title} (${place.source}, ${direction || 'no heading'})`);
+                    
+                    addAnnouncement(place.title, place.source);
                     
                     announcedPlaces.add(placeId);
                     placeCountEl.textContent = announcedPlaces.size;
@@ -522,6 +809,9 @@
             placeCountEl.textContent = '0';
             foundCountEl.textContent = '0';
             currentRadiusEl.textContent = 'N/A';
+            lastSourceEl.textContent = 'N/A';
+            announcementListEl.innerHTML = '';
+            recentAnnouncementsDiv.classList.add('hidden');
             
             speakingDiv.classList.add('hidden');
             startBtn.classList.remove('hidden');
