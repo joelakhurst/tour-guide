@@ -401,7 +401,7 @@
                     `spatialRel=esriSpatialRelIntersects&` +
                     `distance=${searchRadius}&` +
                     `units=esriSRUnit_Meter&` +
-                    `outFields=Name,Grade,ListEntry&` +
+                    `outFields=Name,Grade,ListEntry,CaptureCat&` +
                     `returnGeometry=true&` +
                     `outSR=4326&` +
                     `f=json`;
@@ -416,8 +416,40 @@
                 const data = await response.json();
                 const features = data.features || [];
                 
+                // Filter for interesting buildings only
+                const filteredFeatures = features.filter(f => {
+                    const grade = f.attributes.Grade;
+                    const name = (f.attributes.Name || '').toLowerCase();
+                    const category = (f.attributes.CaptureCat || '').toLowerCase();
+                    
+                    // Only Grade I and II* (not Grade II)
+                    if (grade !== 'I' && grade !== 'II*') {
+                        return false;
+                    }
+                    
+                    // Filter out boring building types
+                    const boringTypes = ['house', 'cottage', 'barn', 'farmhouse', 'wall', 'gate', 
+                                        'milestone', 'boundary', 'stable', 'shed', 'outbuilding'];
+                    const hasBoring = boringTypes.some(type => 
+                        name.includes(type) || category.includes(type)
+                    );
+                    
+                    // Keep interesting types even if they match boring keywords
+                    const interestingTypes = ['church', 'castle', 'abbey', 'priory', 'cathedral', 
+                                             'museum', 'hall', 'manor', 'bridge', 'monument', 
+                                             'tower', 'mill', 'palace', 'theatre'];
+                    const hasInteresting = interestingTypes.some(type => 
+                        name.includes(type) || category.includes(type)
+                    );
+                    
+                    if (hasInteresting) return true;
+                    if (hasBoring) return false;
+                    
+                    return true;
+                });
+                
                 // Convert to format similar to Wikipedia
-                const places = features.map(f => {
+                const places = filteredFeatures.map(f => {
                     const dist = Math.sqrt(
                         Math.pow((f.geometry.x - lon) * 111320 * Math.cos(lat * Math.PI / 180), 2) +
                         Math.pow((f.geometry.y - lat) * 110574, 2)
@@ -435,7 +467,7 @@
                     };
                 }).sort((a, b) => a.dist - b.dist);
                 
-                addDebugMessage(`Historic England: Found ${places.length} listed buildings`);
+                addDebugMessage(`Historic England: Found ${places.length} significant buildings (Grade I/II*)`);
                 return places;
             } catch (error) {
                 console.error('Historic England API error:', error);
@@ -446,14 +478,15 @@
 
         async function fetchNearbyPlaces(lat, lon, searchRadius) {
             try {
-                // Search both Historic England and Wikipedia in parallel
-                const [historicEnglandPlaces, wikipediaPlaces] = await Promise.all([
-                    fetchHistoricEngland(lat, lon, searchRadius),
-                    fetchWikipedia(lat, lon, searchRadius)
+                // Search Wikipedia first, then Historic England
+                // This prioritizes Wikipedia's richer content
+                const [wikipediaPlaces, historicEnglandPlaces] = await Promise.all([
+                    fetchWikipedia(lat, lon, searchRadius),
+                    fetchHistoricEngland(lat, lon, searchRadius)
                 ]);
                 
-                // Combine and deduplicate
-                const allPlaces = [...historicEnglandPlaces, ...wikipediaPlaces];
+                // Combine with Wikipedia first (higher priority)
+                const allPlaces = [...wikipediaPlaces, ...historicEnglandPlaces];
                 const uniquePlaces = [];
                 const seen = new Set();
                 
@@ -468,7 +501,7 @@
                 // Sort by distance
                 uniquePlaces.sort((a, b) => a.dist - b.dist);
                 
-                addDebugMessage(`Found ${uniquePlaces.length} total places (${historicEnglandPlaces.length} from Historic England, ${wikipediaPlaces.length} from Wikipedia)`);
+                addDebugMessage(`Found ${uniquePlaces.length} total places (${wikipediaPlaces.length} Wikipedia, ${historicEnglandPlaces.length} Historic England)`);
                 foundCountEl.textContent = uniquePlaces.length;
                 
                 if (uniquePlaces.length > 0) {
@@ -521,8 +554,26 @@
         async function fetchArticleSummary(place) {
             // Handle Historic England entries
             if (place.source === 'historic_england') {
-                const gradeText = place.grade ? `This is a Grade ${place.grade} listed building.` : 'This is a listed building.';
-                return `${gradeText} It is recognized for its special architectural and historic interest.`;
+                const gradeText = place.grade === 'I' ? 
+                    'This is a Grade I listed building - of exceptional interest' : 
+                    'This is a Grade II* listed building - particularly important';
+                
+                // Try to get Wikipedia info for this building too
+                try {
+                    const searchUrl = `https://en.wikipedia.org/w/api.php?action=opensearch&search=${encodeURIComponent(place.title)}&limit=1&format=json&origin=*`;
+                    const response = await fetch(searchUrl);
+                    const data = await response.json();
+                    
+                    if (data[1] && data[1].length > 0 && data[2] && data[2][0]) {
+                        // Found Wikipedia article - use its summary
+                        return extractInterestingFacts(data[2][0]);
+                    }
+                } catch (error) {
+                    console.log('No Wikipedia match for Historic England entry');
+                }
+                
+                // Fall back to grade info
+                return `${gradeText}. It is recognized as one of England's most significant historic buildings.`;
             }
             
             // Handle Wikipedia entries
@@ -566,7 +617,9 @@
                 'famous', 'notable', 'significant', 'important', 'rare',
                 'unesco', 'heritage', 'medieval', 'ancient', 'historic',
                 'built in', 'dates from', 'founded', 'established',
-                'grade i', 'grade ii', 'listed'
+                'grade i', 'grade ii', 'listed', 'designed by', 'birthplace',
+                'battlefield', 'siege', 'victory', 'royal', 'king', 'queen',
+                'rebellion', 'revolution', 'featured in', 'known for'
             ];
             
             // Score each sentence
@@ -586,6 +639,12 @@
                     }
                 });
                 
+                // Boost for "why it's significant" indicators
+                if (lower.includes('known for') || lower.includes('famous for') || 
+                    lower.includes('notable for') || lower.includes('significance')) {
+                    score += 5;
+                }
+                
                 // Avoid sentences with too many dates/numbers (usually boring details)
                 const numberMatches = sentence.match(/\d{4}|\d+th century/g);
                 if (numberMatches && numberMatches.length > 2) {
@@ -593,17 +652,20 @@
                 }
                 
                 // Avoid sentences that are just definitions or locations
-                if (lower.startsWith('is a') || lower.includes('is located in') || lower.includes('is situated')) {
+                if (lower.startsWith('is a') || lower.startsWith('was a') || 
+                    lower.includes('is located in') || lower.includes('is situated')) {
                     score -= 3;
                 }
                 
                 // Prefer sentences with active verbs
-                if (lower.includes('built') || lower.includes('designed') || lower.includes('created') || lower.includes('founded')) {
+                if (lower.includes('built') || lower.includes('designed') || 
+                    lower.includes('created') || lower.includes('founded')) {
                     score += 1;
                 }
                 
                 // Penalize overly technical language
-                if (lower.includes('consists of') || lower.includes('comprises') || lower.includes('constructed')) {
+                if (lower.includes('consists of') || lower.includes('comprises') || 
+                    lower.includes('constructed of')) {
                     score -= 1;
                 }
                 
@@ -613,7 +675,7 @@
             // Sort by score
             scoredSentences.sort((a, b) => b.score - a.score);
             
-            // Take the highest scoring sentence, or first sentence if none score well
+            // Take the highest scoring sentence
             const topSentences = scoredSentences.slice(0, 2);
             
             // If top sentence has negative score, just use first sentence
@@ -622,19 +684,13 @@
             }
             
             // If we have a good interesting sentence, use just that one
-            if (topSentences[0].score >= 2) {
+            if (topSentences[0].score >= 3) {
                 return topSentences[0].sentence + '.';
             }
             
-            // Otherwise combine first sentence (for context) with best interesting sentence
-            if (topSentences.length >= 2 && topSentences[1].score > 0) {
-                // Remove redundant info from second sentence
-                let secondSent = topSentences[1].sentence;
-                // Don't repeat the name if it's in the first sentence
-                const firstWords = sentences[0].split(' ').slice(0, 5).join(' ');
-                if (secondSent.toLowerCase().includes(firstWords.toLowerCase())) {
-                    return topSentences[0].sentence + '. ' + topSentences[1].sentence + '.';
-                }
+            // If we have two decent sentences, use both
+            if (topSentences.length >= 2 && topSentences[1].score > 1) {
+                return topSentences[0].sentence + '. ' + topSentences[1].sentence + '.';
             }
             
             // Fall back to just first sentence, cleaned up
