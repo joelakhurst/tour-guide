@@ -36,6 +36,7 @@
                     <div id="locationDiv" class="bg-gray-50 border border-gray-200 rounded-lg p-4 mb-4 hidden">
                         <p class="text-sm text-gray-600 mb-1">Current Location:</p>
                         <p class="text-xs font-mono text-gray-700" id="location"></p>
+                        <p class="text-xs text-gray-600 mt-1">Heading: <span id="heading">N/A</span></p>
                     </div>
                     
                     <div id="speakingDiv" class="flex items-center justify-center bg-green-50 border border-green-200 rounded-lg p-3 mb-4 hidden">
@@ -51,6 +52,9 @@
                         </p>
                         <p class="text-xs text-amber-700 mt-1">
                             <strong>Places found nearby:</strong> <span id="foundCount">0</span>
+                        </p>
+                        <p class="text-xs text-amber-700 mt-1">
+                            <strong>Current radius:</strong> <span id="currentRadius">N/A</span>
                         </p>
                         <p class="text-xs text-amber-700 mt-1">
                             <strong>Last check:</strong> <span id="lastCheck">Never</span>
@@ -101,7 +105,7 @@
                 
                 <div class="mt-4 bg-yellow-50 border border-yellow-200 rounded-lg p-3">
                     <p class="text-xs text-yellow-800">
-                        <strong>Note:</strong> This app needs location permissions and internet connection. It works best with the phone plugged in to save battery.
+                        <strong>Note:</strong> This app needs location permissions and internet connection. It works best with the phone plugged in to save battery. The app adapts its search radius based on area density.
                     </p>
                 </div>
             </div>
@@ -118,14 +122,17 @@
         let isProcessing = false;
         let currentLat = null;
         let currentLon = null;
+        let currentHeading = null;
 
         const statusEl = document.getElementById('status');
         const debugInfoEl = document.getElementById('debugInfo');
         const locationEl = document.getElementById('location');
+        const headingEl = document.getElementById('heading');
         const locationDiv = document.getElementById('locationDiv');
         const speakingDiv = document.getElementById('speakingDiv');
         const placeCountEl = document.getElementById('placeCount');
         const foundCountEl = document.getElementById('foundCount');
+        const currentRadiusEl = document.getElementById('currentRadius');
         const lastCheckEl = document.getElementById('lastCheck');
         const debugLogDiv = document.getElementById('debugLog');
         const debugMessagesEl = document.getElementById('debugMessages');
@@ -141,7 +148,6 @@
             debugLogDiv.classList.remove('hidden');
             console.log(msg);
             
-            // Keep only last 10 messages
             while (debugMessagesEl.children.length > 10) {
                 debugMessagesEl.removeChild(debugMessagesEl.lastChild);
             }
@@ -207,13 +213,82 @@
             processSpeechQueue();
         }
 
-        async function fetchNearbyPlaces(lat, lon) {
+        // Calculate bearing between two points
+        function calculateBearing(lat1, lon1, lat2, lon2) {
+            const dLon = (lon2 - lon1) * Math.PI / 180;
+            const y = Math.sin(dLon) * Math.cos(lat2 * Math.PI / 180);
+            const x = Math.cos(lat1 * Math.PI / 180) * Math.sin(lat2 * Math.PI / 180) -
+                      Math.sin(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.cos(dLon);
+            let bearing = Math.atan2(y, x) * 180 / Math.PI;
+            return (bearing + 360) % 360;
+        }
+
+        // Determine if place is on left or right
+        function getDirection(userHeading, bearingToPlace) {
+            if (!userHeading) return null;
+            
+            let relativeBearing = bearingToPlace - userHeading;
+            if (relativeBearing < 0) relativeBearing += 360;
+            if (relativeBearing > 360) relativeBearing -= 360;
+            
+            // Within 45 degrees either side of straight ahead
+            if (relativeBearing < 45 || relativeBearing > 315) return 'ahead';
+            // Right side (45-135 degrees)
+            if (relativeBearing >= 45 && relativeBearing < 135) return 'right';
+            // Left side (225-315 degrees)  
+            if (relativeBearing >= 225 && relativeBearing < 315) return 'left';
+            // Behind (135-225 degrees)
+            return 'behind';
+        }
+
+        // Generate varied announcement based on distance and direction
+        function generateAnnouncement(placeName, summary, distance, direction) {
+            const distKm = distance / 1000;
+            let intro = '';
+            
+            if (distKm <= 0.05) {
+                // Very close (50m or less)
+                const phrases = [
+                    direction === 'right' ? `On your right you'll see ${placeName}` :
+                    direction === 'left' ? `On your left you'll see ${placeName}` :
+                    direction === 'ahead' ? `Up ahead you'll see ${placeName}` :
+                    `You are passing ${placeName}`,
+                    
+                    direction === 'right' ? `Coming up on your right, ${placeName}` :
+                    direction === 'left' ? `Coming up on your left, ${placeName}` :
+                    direction === 'ahead' ? `Straight ahead is ${placeName}` :
+                    `You are near ${placeName}`,
+                ];
+                intro = phrases[Math.floor(Math.random() * phrases.length)];
+            } else if (distKm <= 0.5) {
+                // Medium distance (500m or less)
+                const phrases = [
+                    direction === 'right' ? `Approaching on your right, ${placeName}` :
+                    direction === 'left' ? `Approaching on your left, ${placeName}` :
+                    `You're approaching ${placeName}`,
+                    
+                    `Coming up soon, ${placeName}`,
+                    `Up ahead you'll find ${placeName}`,
+                ];
+                intro = phrases[Math.floor(Math.random() * phrases.length)];
+            } else {
+                // Far (1km)
+                const phrases = [
+                    `You are near ${placeName}`,
+                    `In the area is ${placeName}`,
+                    `Nearby you'll find ${placeName}`,
+                ];
+                intro = phrases[Math.floor(Math.random() * phrases.length)];
+            }
+            
+            return `${intro}. ${summary}`;
+        }
+
+        async function fetchNearbyPlaces(lat, lon, searchRadius) {
             try {
-                // Try using Wikimedia's API directly with proper headers
-                const radius = 2000;
-                const url = `https://en.wikipedia.org/w/api.php?action=query&list=geosearch&gscoord=${lat}|${lon}&gsradius=${radius}&gslimit=10&format=json&origin=*`;
+                const url = `https://en.wikipedia.org/w/api.php?action=query&list=geosearch&gscoord=${lat}|${lon}&gsradius=${searchRadius}&gslimit=15&format=json&origin=*`;
                 
-                addDebugMessage(`Searching at ${lat.toFixed(4)}, ${lon.toFixed(4)}`);
+                addDebugMessage(`Searching at ${lat.toFixed(4)}, ${lon.toFixed(4)} with ${searchRadius}m radius`);
                 
                 const response = await fetch(url, {
                     method: 'GET',
@@ -232,12 +307,14 @@
                 const data = await response.json();
                 const places = data.query?.geosearch || [];
                 
-                addDebugMessage(`Found ${places.length} places in 2km radius`);
+                addDebugMessage(`Found ${places.length} places in ${searchRadius}m radius`);
                 foundCountEl.textContent = places.length;
                 
                 if (places.length > 0) {
                     places.forEach((p, i) => {
-                        addDebugMessage(`${i+1}. ${p.title} - ${(p.dist/1000).toFixed(2)}km away`);
+                        if (i < 5) {
+                            addDebugMessage(`${i+1}. ${p.title} - ${p.dist}m away`);
+                        }
                     });
                 } else {
                     addDebugMessage('No Wikipedia entries found nearby');
@@ -288,9 +365,29 @@
             
             lastCheckTime = now;
             lastCheckEl.textContent = new Date().toLocaleTimeString();
-            setStatus('Checking for nearby places...', `Searching within 1km radius`);
             
-            const places = await fetchNearbyPlaces(lat, lon);
+            // First, do a wide search to determine density
+            setStatus('Checking area density...');
+            const densityCheck = await fetchNearbyPlaces(lat, lon, 2000);
+            
+            // Determine appropriate radius based on density
+            let announceRadius;
+            if (densityCheck.length >= 10) {
+                announceRadius = 50;
+                addDebugMessage('High density area - using 50m radius');
+            } else if (densityCheck.length >= 5) {
+                announceRadius = 500;
+                addDebugMessage('Medium density area - using 500m radius');
+            } else {
+                announceRadius = 1000;
+                addDebugMessage('Low density area - using 1km radius');
+            }
+            
+            currentRadiusEl.textContent = `${announceRadius}m`;
+            setStatus('Checking for nearby places...', `Using ${announceRadius}m radius`);
+            
+            // Now search with the appropriate radius
+            const places = await fetchNearbyPlaces(lat, lon, announceRadius);
             
             if (places.length === 0) {
                 setStatus('Listening for places...', 'No places found nearby');
@@ -298,44 +395,42 @@
                 return;
             }
             
-            let foundWithin1km = 0;
             let announced = false;
             
             for (const place of places) {
                 const placeId = place.pageid.toString();
-                const distKm = (place.dist / 1000).toFixed(2);
                 
-                if (place.dist <= 1000) {
-                    foundWithin1km++;
+                if (announcedPlaces.has(placeId)) {
+                    addDebugMessage(`${place.title} already announced`);
+                    continue;
+                }
+                
+                setStatus(`Found: ${place.title}`, `Distance: ${place.dist}m`);
+                addDebugMessage(`Fetching info for ${place.title}...`);
+                
+                const summary = await fetchArticleSummary(place.pageid);
+                
+                if (summary) {
+                    // Calculate direction
+                    const bearingToPlace = calculateBearing(lat, lon, place.lat, place.lon);
+                    const direction = getDirection(currentHeading, bearingToPlace);
                     
-                    if (announcedPlaces.has(placeId)) {
-                        addDebugMessage(`${place.title} already announced`);
-                        continue;
-                    }
+                    const announcement = generateAnnouncement(place.title, summary, place.dist, direction);
+                    addToSpeechQueue(announcement);
+                    addDebugMessage(`Announcing: ${place.title} (${direction || 'no heading'})`);
                     
-                    setStatus(`Found: ${place.title}`, `Distance: ${distKm}km`);
-                    addDebugMessage(`Fetching info for ${place.title}...`);
+                    announcedPlaces.add(placeId);
+                    placeCountEl.textContent = announcedPlaces.size;
+                    announced = true;
                     
-                    const summary = await fetchArticleSummary(place.pageid);
-                    
-                    if (summary) {
-                        const announcement = `You are near ${place.title}. ${summary}`;
-                        addToSpeechQueue(announcement);
-                        addDebugMessage(`Announcing: ${place.title}`);
-                        
-                        announcedPlaces.add(placeId);
-                        placeCountEl.textContent = announcedPlaces.size;
-                        announced = true;
-                        
-                        break;
-                    } else {
-                        addDebugMessage(`No summary available for ${place.title}`);
-                    }
+                    break;
+                } else {
+                    addDebugMessage(`No summary available for ${place.title}`);
                 }
             }
             
             if (!announced) {
-                const msg = `Found ${foundWithin1km} place(s) within 1km but already announced or no summary available`;
+                const msg = `No new places to announce (already covered or no summaries)`;
                 setStatus('Listening for places...', msg);
                 addDebugMessage(msg);
             }
@@ -344,8 +439,18 @@
         function handleLocationUpdate(position) {
             currentLat = position.coords.latitude;
             currentLon = position.coords.longitude;
+            currentHeading = position.coords.heading;
             
             locationEl.textContent = `${currentLat.toFixed(6)}, ${currentLon.toFixed(6)}`;
+            
+            if (currentHeading !== null && currentHeading !== undefined) {
+                const directions = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+                const index = Math.round(currentHeading / 45) % 8;
+                headingEl.textContent = `${Math.round(currentHeading)}° (${directions[index]})`;
+            } else {
+                headingEl.textContent = 'N/A (not moving)';
+            }
+            
             locationDiv.classList.remove('hidden');
             
             if (isActive) {
@@ -416,6 +521,7 @@
             lastCheckTime = 0;
             placeCountEl.textContent = '0';
             foundCountEl.textContent = '0';
+            currentRadiusEl.textContent = 'N/A';
             
             speakingDiv.classList.add('hidden');
             startBtn.classList.remove('hidden');
