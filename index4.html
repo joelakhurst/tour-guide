@@ -478,40 +478,19 @@
 
         async function fetchNearbyPlaces(lat, lon, searchRadius) {
             try {
-                // Search Wikipedia first, then Historic England
-                // This prioritizes Wikipedia's richer content
-                const [wikipediaPlaces, historicEnglandPlaces] = await Promise.all([
-                    fetchWikipedia(lat, lon, searchRadius),
-                    fetchHistoricEngland(lat, lon, searchRadius)
-                ]);
+                // Just use Wikipedia for better, more interesting content
+                const places = await fetchWikipedia(lat, lon, searchRadius);
                 
-                // Combine with Wikipedia first (higher priority)
-                const allPlaces = [...wikipediaPlaces, ...historicEnglandPlaces];
-                const uniquePlaces = [];
-                const seen = new Set();
+                addDebugMessage(`Found ${places.length} places from Wikipedia`);
+                foundCountEl.textContent = places.length;
                 
-                for (const place of allPlaces) {
-                    const key = place.title.toLowerCase();
-                    if (!seen.has(key)) {
-                        seen.add(key);
-                        uniquePlaces.push(place);
-                    }
-                }
-                
-                // Sort by distance
-                uniquePlaces.sort((a, b) => a.dist - b.dist);
-                
-                addDebugMessage(`Found ${uniquePlaces.length} total places (${wikipediaPlaces.length} Wikipedia, ${historicEnglandPlaces.length} Historic England)`);
-                foundCountEl.textContent = uniquePlaces.length;
-                
-                if (uniquePlaces.length > 0) {
-                    uniquePlaces.slice(0, 5).forEach((p, i) => {
-                        const source = p.source === 'historic_england' ? ' [HE]' : ' [Wiki]';
-                        addDebugMessage(`${i+1}. ${p.title}${source} - ${Math.round(p.dist)}m away`);
+                if (places.length > 0) {
+                    places.slice(0, 5).forEach((p, i) => {
+                        addDebugMessage(`${i+1}. ${p.title} - ${Math.round(p.dist)}m away`);
                     });
                 }
                 
-                return uniquePlaces;
+                return places;
             } catch (error) {
                 addDebugMessage(`ERROR: ${error.message}`);
                 setStatus('Error fetching places', error.message);
@@ -552,31 +531,6 @@
         }
 
         async function fetchArticleSummary(place) {
-            // Handle Historic England entries
-            if (place.source === 'historic_england') {
-                const gradeText = place.grade === 'I' ? 
-                    'This is a Grade I listed building - of exceptional interest' : 
-                    'This is a Grade II* listed building - particularly important';
-                
-                // Try to get Wikipedia info for this building too
-                try {
-                    const searchUrl = `https://en.wikipedia.org/w/api.php?action=opensearch&search=${encodeURIComponent(place.title)}&limit=1&format=json&origin=*`;
-                    const response = await fetch(searchUrl);
-                    const data = await response.json();
-                    
-                    if (data[1] && data[1].length > 0 && data[2] && data[2][0]) {
-                        // Found Wikipedia article - use its summary
-                        return extractInterestingFacts(data[2][0]);
-                    }
-                } catch (error) {
-                    console.log('No Wikipedia match for Historic England entry');
-                }
-                
-                // Fall back to grade info
-                return `${gradeText}. It is recognized as one of England's most significant historic buildings.`;
-            }
-            
-            // Handle Wikipedia entries
             try {
                 const pageId = place.pageid.replace('wiki_', '');
                 const url = `https://en.wikipedia.org/w/api.php?action=query&prop=extracts&exintro=1&explaintext=1&pageids=${pageId}&format=json&origin=*`;
@@ -758,9 +712,9 @@
                     
                     const announcement = generateAnnouncement(place.title, summary, place.dist, direction);
                     addToSpeechQueue(announcement);
-                    addDebugMessage(`Announcing: ${place.title} (${place.source}, ${direction || 'no heading'})`);
+                    addDebugMessage(`Announcing: ${place.title} (${direction || 'no heading'})`);
                     
-                    addAnnouncement(place.title, place.source);
+                    addAnnouncement(place.title, 'wikipedia');
                     
                     announcedPlaces.add(placeId);
                     placeCountEl.textContent = announcedPlaces.size;
