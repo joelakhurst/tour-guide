@@ -571,9 +571,16 @@
                 'famous', 'notable', 'significant', 'important', 'rare',
                 'unesco', 'heritage', 'medieval', 'ancient', 'historic',
                 'built in', 'dates from', 'founded', 'established',
-                'grade i', 'grade ii', 'listed', 'designed by', 'birthplace',
+                'designed by', 'birthplace',
                 'battlefield', 'siege', 'victory', 'royal', 'king', 'queen',
                 'rebellion', 'revolution', 'featured in', 'known for'
+            ];
+            
+            // Boring phrases to strongly avoid
+            const boringPhrases = [
+                'is a grade', 'listed building', 'is a parish', 
+                'is located in', 'is situated', 'is a church in',
+                'within the', 'in the county of'
             ];
             
             // Score each sentence
@@ -581,46 +588,54 @@
                 const lower = sentence.toLowerCase();
                 let score = 0;
                 
-                // Avoid overly long or short sentences
-                if (sentence.length < 20 || sentence.length > 250) {
-                    score -= 5;
-                }
-                
-                // Check for interesting keywords
-                interestingKeywords.forEach(keyword => {
-                    if (lower.includes(keyword)) {
-                        score += 3;
+                // Strongly penalize boring administrative sentences
+                boringPhrases.forEach(phrase => {
+                    if (lower.includes(phrase)) {
+                        score -= 10;
                     }
                 });
                 
-                // Boost for "why it's significant" indicators
-                if (lower.includes('known for') || lower.includes('famous for') || 
-                    lower.includes('notable for') || lower.includes('significance')) {
-                    score += 5;
+                // Skip sentences that are just about the building type/location
+                if (lower.startsWith('is a') || lower.startsWith('was a') ||
+                    lower.startsWith('the church of') || lower.startsWith('church of')) {
+                    score -= 8;
                 }
                 
-                // Avoid sentences with too many dates/numbers (usually boring details)
-                const numberMatches = sentence.match(/\d{4}|\d+th century/g);
-                if (numberMatches && numberMatches.length > 2) {
-                    score -= 2;
-                }
-                
-                // Avoid sentences that are just definitions or locations
-                if (lower.startsWith('is a') || lower.startsWith('was a') || 
-                    lower.includes('is located in') || lower.includes('is situated')) {
+                // Avoid overly long or short sentences
+                if (sentence.length < 30 || sentence.length > 300) {
                     score -= 3;
                 }
                 
-                // Prefer sentences with active verbs
+                // Check for interesting keywords - higher boost
+                interestingKeywords.forEach(keyword => {
+                    if (lower.includes(keyword)) {
+                        score += 5;
+                    }
+                });
+                
+                // Big boost for "why it's significant" indicators
+                if (lower.includes('known for') || lower.includes('famous for') || 
+                    lower.includes('notable for') || lower.includes('unique in') ||
+                    lower.includes('only one')) {
+                    score += 10;
+                }
+                
+                // Avoid sentences with too many dates/numbers
+                const numberMatches = sentence.match(/\d{4}|\d+th century/g);
+                if (numberMatches && numberMatches.length > 3) {
+                    score -= 3;
+                }
+                
+                // Prefer sentences with active interesting verbs
                 if (lower.includes('built') || lower.includes('designed') || 
-                    lower.includes('created') || lower.includes('founded')) {
-                    score += 1;
+                    lower.includes('created') || lower.includes('founded') ||
+                    lower.includes('features') || lower.includes('contains')) {
+                    score += 2;
                 }
                 
                 // Penalize overly technical language
-                if (lower.includes('consists of') || lower.includes('comprises') || 
-                    lower.includes('constructed of')) {
-                    score -= 1;
+                if (lower.includes('consists of') || lower.includes('comprises')) {
+                    score -= 2;
                 }
                 
                 return { sentence, score };
@@ -629,26 +644,36 @@
             // Sort by score
             scoredSentences.sort((a, b) => b.score - a.score);
             
-            // Take the highest scoring sentence
-            const topSentences = scoredSentences.slice(0, 2);
+            // Filter out anything with very negative scores
+            const goodSentences = scoredSentences.filter(s => s.score >= -5);
             
-            // If top sentence has negative score, just use first sentence
-            if (topSentences[0].score < 0 && sentences.length > 0) {
-                return sentences[0] + '.';
+            if (goodSentences.length === 0) {
+                // If nothing scored well, just use first non-boring sentence
+                const firstGood = scoredSentences.find(s => s.score > -8);
+                return firstGood ? firstGood.sentence + '.' : sentences[0] + '.';
             }
             
-            // If we have a good interesting sentence, use just that one
-            if (topSentences[0].score >= 3) {
-                return topSentences[0].sentence + '.';
+            // Take top 1-2 interesting sentences
+            const result = [];
+            
+            // Always include the best sentence if it's genuinely interesting
+            if (goodSentences[0].score >= 5) {
+                result.push(goodSentences[0].sentence);
             }
             
-            // If we have two decent sentences, use both
-            if (topSentences.length >= 2 && topSentences[1].score > 1) {
-                return topSentences[0].sentence + '. ' + topSentences[1].sentence + '.';
+            // Add a second sentence if it's also interesting and adds value
+            if (goodSentences.length > 1 && goodSentences[1].score >= 5) {
+                result.push(goodSentences[1].sentence);
             }
             
-            // Fall back to just first sentence, cleaned up
-            return sentences[0] + '.';
+            // If we got interesting sentences, use them
+            if (result.length > 0) {
+                return result.join('. ') + '.';
+            }
+            
+            // Otherwise find first decent sentence that's not boring
+            const decent = goodSentences[0];
+            return decent.sentence + '.';
         }
 
         async function checkAndAnnounce(lat, lon, forceCheck = false) {
